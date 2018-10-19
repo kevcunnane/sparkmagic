@@ -146,7 +146,10 @@ class LivySession(ObjectWithGuid):
             html = get_sessions_info_html([self], self.id)
             self.ipython_display.html(html)
 
-            command = Command("spark")
+            if(self.kind == constants.SESSION_KIND_SPARKR):
+               command = Command("sparkR.session()")
+            else:
+               command = Command("spark")
             (success, out) = command.execute(self)
 
             if success:
