@@ -12,7 +12,7 @@ from IPython.core.magic_arguments import argument, magic_arguments
 from hdijupyterutils.utils import generate_uuid
 
 import sparkmagic.utils.configuration as conf
-from sparkmagic.utils.configuration import get_session_kind
+from sparkmagic.utils.configuration import get_livy_kind
 from sparkmagic.utils import constants
 from sparkmagic.utils.utils import parse_argstring_or_throw, get_coerce_value
 from sparkmagic.utils.sparkevents import SparkEvents
@@ -27,15 +27,15 @@ from sparkmagic.livyclientlib.exceptions import handle_expected_exceptions, wrap
 def _event(f):
     def wrapped(self, *args, **kwargs):
         guid = self._generate_uuid()
-        self._spark_events.emit_magic_execution_start_event(f.__name__, get_session_kind(self.language), guid)
+        self._spark_events.emit_magic_execution_start_event(f.__name__, get_livy_kind(self.language), guid)
         try:
             result = f(self, *args, **kwargs)
         except Exception as e:
-            self._spark_events.emit_magic_execution_end_event(f.__name__, get_session_kind(self.language), guid,
+            self._spark_events.emit_magic_execution_end_event(f.__name__, get_livy_kind(self.language), guid,
                                                               False, e.__class__.__name__, str(e))
             raise
         else:
-            self._spark_events.emit_magic_execution_end_event(f.__name__, get_session_kind(self.language), guid,
+            self._spark_events.emit_magic_execution_end_event(f.__name__, get_livy_kind(self.language), guid,
                                                               True, u"", u"")
             return result
     wrapped.__name__ = f.__name__
@@ -375,6 +375,16 @@ class KernelMagics(SparkMagicBase):
             raise BadUserDataException(error)
 
         self.endpoint = Endpoint(server, auth, username, password)
+
+    @line_magic
+    def matplot(self, line, cell="", local_ns=None):
+        session = self.spark_controller.get_session_by_name_or_default(self.session_name)
+        command = Command("%matplot " + line)
+        (success, out) = command.execute(session)
+        if success:
+            session.ipython_display.display(out)
+        else:
+            session.ipython_display.send_error(out)
 
     def refresh_configuration(self):
         credentials = getattr(conf, 'base64_kernel_' + self.language + '_credentials')()

@@ -17,38 +17,56 @@ from .exceptions import LivyClientTimeoutException, \
 
 class _HeartbeatThread(threading.Thread):
     def __init__(self, livy_session, refresh_seconds, retry_seconds, run_at_most=None):
+        """
+        Parameters
+        ----------
+        livy_session : LivySession
+        refresh_seconds: int
+            The seconds to sleep between refreshing the Livy session status and info
+        retry_seconds: int
+            The seconds to sleep before retrying on a failed refresh
+        run_at_most: int, optional
+            The max number of loops to execute before ending this thread
+        """
         super(_HeartbeatThread, self).__init__()
-        
+
         self.livy_session = livy_session
         self.refresh_seconds = refresh_seconds
         self.retry_seconds = retry_seconds
+        if run_at_most is None:
+            # a billion iterations should be sufficient
+            run_at_most = int(1e9)
         self.run_at_most = run_at_most
 
     def run(self):
-        i = 0
-        if self.livy_session is not None:
-            self.livy_session.logger.info(u'Starting heartbeat for session {}'.format(self.livy_session.id))
-        else:
-            self.livy_session.logger.info(u'Will not start heartbeat because session is none')
-        
-        while self.livy_session is not None:
+        loop_counter = 0
+        if self.livy_session is None:
+            print(u"Will not start heartbeat thread because self.livy_session is None")
+            return
+
+        self.livy_session.logger.info(u'Starting heartbeat for session {}'.format(self.livy_session.id))
+
+        while self.livy_session is not None and loop_counter < self.run_at_most:
+            loop_counter += 1
+
             try:
+                sleep_time = self.refresh_seconds
                 self.livy_session.refresh_status_and_info()
-                sleep(self.refresh_seconds)
             except Exception as e:
+                sleep_time = self.retry_seconds
+                # The built-in python logger has exception handling built in. If you expose
+                # the "exception" function in the SparkLog class then you could just make this
+                # self.livy_session.logger.exception("some useful message") and it'll print
+                # out the stack trace too.
                 self.livy_session.logger.error(u'{}'.format(e))
-                sleep(self.retry_seconds)
-            
-            if self.run_at_most is not None:
-                i += 1
-                
-                if i >= self.run_at_most:
-                    return
+
+            sleep(sleep_time)
+
 
     def stop(self):
         if self.livy_session is not None:
             self.livy_session.logger.info(u'Stopping heartbeat for session {}'.format(self.livy_session.id))
-        
+
         self.livy_session = None
         self.join()
 
@@ -98,7 +116,7 @@ class LivySession(ObjectWithGuid):
         self.kind = kind
         self.id = session_id
         self.session_info = u""
-        
+
         self._heartbeat_thread = None
         if session_id == -1:
             self.status = constants.NOT_STARTED_SESSION_STATUS
@@ -112,14 +130,11 @@ class LivySession(ObjectWithGuid):
 
     def _translate_to_livy_kind(self, properties, kind):
         # Livy does not support "pyspark3" as the kind from 0.4 onwards and only "pyspark" is valid.
-        # That's why we are leveraging PYSPARK_PYTHON_PARAM here to specifyf different python versions.
-        if kind in [constants.SESSION_KIND_PYSPARK, constants.SESSION_KIND_PYSPARK3] and not constants.LIVY_CONF_PARAM in properties:
-            properties[constants.LIVY_CONF_PARAM] = dict()
+        # That's why we are leveraging PYSPARK_PYTHON_PARAM here to specify different python versions.
         if kind == constants.SESSION_KIND_PYSPARK:
+            if not constants.LIVY_CONF_PARAM in properties:
+                properties[constants.LIVY_CONF_PARAM] = dict()
             properties[constants.LIVY_CONF_PARAM][constants.PYSPARK_PYTHON_PARAM] = constants.LANG_PYTHON
-        elif kind == constants.SESSION_KIND_PYSPARK3:
-            properties[constants.LIVY_KIND_PARAM] = constants.SESSION_KIND_PYSPARK
-            properties[constants.LIVY_CONF_PARAM][constants.PYSPARK_PYTHON_PARAM] = constants.LANG_PYTHON3
 
     def start(self):
         """Start the session against actual livy server."""
@@ -132,10 +147,10 @@ class LivySession(ObjectWithGuid):
             self.status = str(r[u"state"])
 
             self.ipython_display.writeln(u"Starting Spark application")
-            
+
             # Start heartbeat thread to keep Livy interactive session alive.
             self._start_heartbeat_thread()
-            
+
             # We wait for livy_session_startup_timeout_seconds() for the session to start up.
             try:
                 self.wait_for_idle(conf.livy_session_startup_timeout_seconds())
@@ -215,7 +230,7 @@ class LivySession(ObjectWithGuid):
 
         try:
             self.logger.debug(u"Deleting session '{}'".format(session_id))
-            
+
             if self.status != constants.NOT_STARTED_SESSION_STATUS:
                 self._http_client.delete_session(session_id)
                 self._stop_heartbeat_thread()
@@ -224,7 +239,7 @@ class LivySession(ObjectWithGuid):
             else:
                 self.ipython_display.send_error(u"Cannot delete session {} that is in state '{}'."
                                                 .format(session_id, self.status))
-            
+
         except Exception as e:
             self._spark_events.emit_session_deletion_end_event(self.guid, self.kind, session_id, self.status, False,
                                                                e.__class__.__name__, str(e))
@@ -294,12 +309,12 @@ class LivySession(ObjectWithGuid):
         if self._should_heartbeat and self._heartbeat_thread is None:
             refresh_seconds = conf.heartbeat_refresh_seconds()
             retry_seconds = conf.heartbeat_retry_seconds()
-            
+
             if self._user_passed_heartbeat_thread is None:
                 self._heartbeat_thread = _HeartbeatThread(self, refresh_seconds, retry_seconds)
             else:
                 self._heartbeat_thread = self._user_passed_heartbeat_thread
-            
+
             self._heartbeat_thread.daemon = True
             self._heartbeat_thread.start()
 
